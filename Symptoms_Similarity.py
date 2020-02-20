@@ -1,45 +1,63 @@
 
 # Data obtained from
 
-http://people.dbmi.columbia.edu/~friedma/Projects/DiseaseSymptomKB/index.html
+# http://people.dbmi.columbia.edu/~friedma/Projects/DiseaseSymptomKB/index.html
 
 
+from flask import Flask, escape, request, jsonify
+from keras.layers import Input
+from keras.layers import Embedding
+from keras.models import Model
+from keras.layers import Dot, Reshape, Dense
+from keras.preprocessing import sequence
+import random
+import operator
 import pandas as pd
 import numpy as np
 import re
 
 # read in the 50-dimensional GloVe vectors
+
+
 def read_glove_vecs(file):
-    with open(file, 'r') as f:
+    with open(file,  encoding="utf8") as f:
         words = set()
         word_to_vec_map = {}
-        
+
         for line in f:
             line = line.strip().split()
             word = line[0]
             words.add(word)
             word_to_vec_map[word] = np.array(line[1:], dtype=np.float64)
-            
+
     return words, word_to_vec_map
 
-words, word_to_vec_map = read_glove_vecs('data/glove.6B.50d.txt') # replace file path with your location for 50-d embeddings
+
+# replace file path with your location for 50-d embeddings
+words, word_to_vec_map = read_glove_vecs('data/glove.6B.50d.txt')
 
 # for use later on; finds the cosine similarity b/w 2 vectors
+
+
 def cosine_similarity(x, y):
-    
-    # Compute the dot product between x and y 
-    dot = np.dot(x,y)
-    # Compute the L2 norm of x 
+
+    # Compute the dot product between x and y
+    dot = np.dot(x, y)
+    # Compute the L2 norm of x
     norm_x = np.sqrt(np.sum(x**2))
     # Compute the L2 norm of y
     norm_y = np.sqrt(np.sum(y**2))
     # Compute the cosine similarity
-    cosine_similarity = dot/(norm_x * norm_y)
-    
+    # print(type(dot/(norm_x * norm_y)))
+    result = dot/(norm_x * norm_y)
 
-#read in the data from the file
-df = pd.read_excel('Disease_Symptoms.xlsx').drop('Count of Disease Occurrence', axis = 1).fillna(method = 'ffill')
+    return result
 
+
+# read in the data from the file
+df = pd.read_excel('Disease_Symptoms.xlsx').drop(
+    'Count of Disease Occurrence', axis=1).fillna(method='ffill')
+# print(df)
 # some basic preprocessing to get the data into required formats
 df.Symptom = df.Symptom.map(lambda x: re.sub('^.*_', '', x))
 df.Disease = df.Disease.map(lambda x: re.sub('^.*_', '', x))
@@ -62,13 +80,17 @@ df.Disease = df.Disease.map(lambda x: re.sub('\\xa0', ' ', x))
 
 # there may be words in the data set that don't have a representation in the 50-d GloVe vectors.
 # Now, new embeddings for such words can be generated, but they'll require humungous amounts of data
-# that maps its context words (diseases in this case), that has to be trained for at least 10000 iterations, in order to 
-# generalise well. And upon inspection, 
+# that maps its context words (diseases in this case), that has to be trained for at least 10000 iterations, in order to
+# generalise well. And upon inspection,
 counts = {}
+
+
 def remove(x):
     for i in x.split():
         if not i in word_to_vec_map.keys():
             counts[i] = counts.get(i, 0) + 1
+
+
 df.Symptom.map(lambda x: remove(x))
 df.Disease.map(lambda x: remove(x))
 
@@ -79,46 +101,53 @@ unrepresented_words['No. of Occurences'] = counts.values()
 unrepresented_words.to_csv('Unrepresented Words.csv')
 
 # reorganises the dataframe by grouping the data by symptoms instead of by diseases
-frame = pd.DataFrame(df.groupby(['Symptom', 'Disease']).size()).drop(0, axis = 1)
+frame = pd.DataFrame(df.groupby(['Symptom', 'Disease']).size()).drop(0, axis=1)
 # the first entry contains only the disease and no symptom, so it is dropped
 frame = frame.iloc[1:]
 
 # set the index of the dataframe as 'Symptom'
 frame = frame.reset_index().set_index('Symptom')
 
+# print(frame)
 # get the counts of each symptom, ie, how many times it occurs in the data set
 counts = {}
 for i in frame.index:
     counts[i] = counts.get(i, 0) + 1
-	
+# print(counts.items())
 # sort the symptoms by their counts in descending order and save it into a dataframe
-import operator
-sym, ct = zip(*sorted(counts.items(), key = operator.itemgetter(1), reverse = True))
+sym, ct = zip(
+    *sorted(counts.items(), key=operator.itemgetter(1), reverse=True))
 sym_count = pd.DataFrame()
 sym_count['Symptom'] = sym
-sym_count['Count'] =  ct
+sym_count['Count'] = ct
 sym_count.to_csv('Symptom Counts.csv')
 
 # drop the symptoms that have fewer than 6 entries in the data set
-[frame.drop(i, inplace = True) for i in frame.index if counts[i] < 6]
-    
+# [frame.drop(i, inplace = True) for i in frame.index if counts[i] < 6]
+
+
 # extract all the diseases present in the data set and make them into a list, for use later on
-lst = []
-frame.Disease.map(lambda x: lst.append(x))
+
+# python 2
+# lst = []
+# frame.Disease.map(lambda x: lst.append(x))
+
+# python 3
+lst = list(map(lambda x: x, frame.Disease))
+# print(lst)
 
 # For us to train our own word embeddings on top of the existing GloVe representation, we are going to use the skipgram model.
 # Each symptom has a disease associated with it, and we use this as the (target word, context word) pair for skipgram generation.
 # The 'skipgrams' function in Keras samples equal no. of context and non-context words for a given word from the distribution,
 # and we are going to do the same here.
-# First we'll make a list that stores the pair and its corresponding label of 1, if the disease is indeed associated with 
+# First we'll make a list that stores the pair and its corresponding label of 1, if the disease is indeed associated with
 # the symptom, and 0 otherwise.
 couples_and_labels = []
 
-import random
 # run through the symptoms
 for i in frame.index.unique():
     # make a temporary list of the diseases associated with the symptom (actual context words)
-    a = list(frame.Disease.loc[i].values)
+    a = list(frame.Disease.loc[i])
     # loop through the context words
     for j in a:
         # randomly select a disease that isn't associated with the symptom, to set as a non-context word with label 0,
@@ -128,26 +157,32 @@ for i in frame.index.unique():
         couples_and_labels.append((i, j, 1))
         couples_and_labels.append((i, non_context, 0))
 
+# print(couples_and_labels)
+
 # the entries in the couples_and_labels list now follow the pattern of 1, 0, 1, 0 for the labels. We shuffle it up.
 b = random.sample(couples_and_labels, len(couples_and_labels))
 # Extract the symptoms, the diseases and the corresponding labels
+# print(b)
 symptom, disease, label = zip(*b)
+# print(symptom)
+# print(disease)
+# print(label)
 
-# Transform them into series' to get unique entries in each ('set()' not used as it generates a different order each time 
+# Transform them into series' to get unique entries in each ('set()' not used as it generates a different order each time
 # and the index(number) associated with a word changes each time the program is run)
 s1 = pd.Series(list(symptom))
 s2 = pd.Series(list(disease))
 dic = {}
 
 # Map each word in the symptoms and diseases to a corresponding number that can be fed into Keras
-for i,j in enumerate(s1.append(s2).unique()):
+for i, j in enumerate(s1.append(s2).unique()):
     dic[j] = i
 # Now all the symptoms are represented by a number in the arrays 'symptoms', and 'diseases'
-symptoms = np.array(s1.map(dic), dtype = 'int32')
-diseases = np.array(s2.map(dic), dtype = 'int32')
+symptoms = np.array(s1.map(dic), dtype='int32')
+diseases = np.array(s2.map(dic), dtype='int32')
 
 # Make the labels too into an array
-labels = np.array(label, dtype = 'int32')
+labels = np.array(label, dtype='int32')
 
 lst = []
 
@@ -164,31 +199,30 @@ embedding_matrix = np.zeros((len(dic), 50))
 for word, index in dic.items():
     # split each symptom/disease into a list of constituent words
     for i in word.split():
-        lst.append(word_to_vec_map[i]) # add the embeddings of each word in symptoms and diseases to list 'lst'
-    # make an array out of the list    
-    arr = np.array(lst) 
+        # add the embeddings of each word in symptoms and diseases to list 'lst'
+        lst.append(word_to_vec_map[i])
+    # make an array out of the list
+    arr = np.array(lst)
     # sum the embeddings of all words in the sentence, to get an embedding of the entire sentence
     # if in the entire sentence, word embeddings weren't available in GloVe vectors, make that sentence into a
     # zero array of shape (50,), just as a precaution, as we have already removed such words
-    arrsum = arr.sum(axis = 0)     
+    arrsum = arr.sum(axis=0)
     # normalize the values
-    arrsum = arrsum/np.sqrt((arrsum**2).sum()) 
+    arrsum = arrsum/np.sqrt((arrsum**2).sum())
     # add the embedding to the corresponding word index
-    embedding_matrix[index,:] = arrsum
-    
-#TRAIN NEW WORD EMBEDDINGS ON CORPUS
+    embedding_matrix[index, :] = arrsum
 
-#import necessary keras modules
-from keras.preprocessing import sequence
-from keras.layers import Dot, Reshape, Dense
-from keras.models import Model
+# TRAIN NEW WORD EMBEDDINGS ON CORPUS
+
+# import necessary keras modules
 
 # START BUILDING THE KERAS MODEL FOR TRAINING
 input_target = Input((1,))
 input_context = Input((1,))
 
 # make a Keras embedding layer of shape (vocab_size, vector_dim) and set 'trainable' argument to 'True'
-embedding = Embedding(input_dim = vocab_size, output_dim = vector_dim, input_length = 1, name='embedding', trainable = True)
+embedding = Embedding(input_dim=vocab_size, output_dim=vector_dim,
+                      input_length=1, name='embedding', trainable=True)
 
 # load pre-trained weights(embeddings) from 'embedding_matrix' into the Keras embedding layer
 embedding.build((None,))
@@ -202,18 +236,18 @@ target = embedding(input_target)
 target = Reshape((vector_dim, 1))(target)
 
 # compute the dot product of the context and target words, to find the similarity (dot product is usually a measure of similarity)
-dot = Dot(axes = 1)([context, target])
+dot = Dot(axes=1)([context, target])
 dot = Reshape((1,))(dot)
 # pass it through a 'sigmoid' activation neuron; this is then comapared with the value in 'label' generated from the skipgram
-out = Dense(1, activation = 'sigmoid')(dot)
+out = Dense(1, activation='sigmoid')(dot)
 
 # create model instance
-model = Model(input = [input_context, input_target], output = out)
-model.compile(loss = 'binary_crossentropy', optimizer = 'adam')
+model = Model(input=[input_context, input_target], output=out)
+model.compile(loss='binary_crossentropy', optimizer='adam')
 
 # fit the model, default batch_size of 32
 # running for 25 epochs seems to generate good enough results, although running for more iterations may improve performance further
-model.fit(x = [symptoms, diseases], y = labels, epochs = 25,)
+model.fit(x=[symptoms, diseases], y=labels, epochs=25,)
 
 # get the new weights (embeddings) after running through keras
 new_vecs = model.layers[2].get_weights()[0]
@@ -239,13 +273,45 @@ dic = {}
 for i in d.index:
     dic[d.Key.loc[i]] = d.Values.loc[i]
 
-# enter the symptom
-symp = input('Enter symptom for which similar symptoms are to be found: ')
-print ('\nThe similar symptoms are: ')
 
-# loop through the symptoms in the data set and find the symptoms with cosine similarity greater than 'similarity_score'
-for i in set(symptom):
-    if (cosine_similarity(new_vecs[dic[i]], new_vecs[dic[symp]])) > similarity_score:
-        # remove the same symptom from the list of outputs
-        if i != symp:
-            print (i)
+# # enter the symptom
+# symp = input('Enter symptom for which similar symptoms are to be found: ')
+# print('\nThe similar symptoms are: ')
+
+# # loop through the symptoms in the data set and find the symptoms with cosine similarity greater than 'similarity_score'
+# for i in set(symptom):
+#     if (cosine_similarity(new_vecs[dic[i]], new_vecs[dic[symp]])) > similarity_score:
+#         # remove the same symptom from the list of outputs
+#         if i != symp:
+#             print(i)
+
+
+app = Flask(__name__)
+
+
+@app.route('/symptoms')
+def GetSymptoms():
+    key = request.args.get("key")
+    # loop through the symptoms in the data set and find the symptoms with cosine similarity greater than 'similarity_score'
+    response = []
+    for i in set(symptom):
+        if (cosine_similarity(new_vecs[dic[i]], new_vecs[dic[key]])) > similarity_score:
+            # remove the same symptom from the list of outputs
+            if i != key:
+                response.append(i)
+    return jsonify(response)
+
+
+@app.route('/symptoms')
+def AddSymptoms():
+    key = request.args.get("key")
+    # loop through the symptoms in the data set and find the symptoms with cosine similarity greater than 'similarity_score'
+    response = []
+    for i in set(symptom):
+        if (cosine_similarity(new_vecs[dic[i]], new_vecs[dic[key]])) > similarity_score:
+            # remove the same symptom from the list of outputs
+            if i != key:
+                response.append(i)
+    return jsonify(response)
+
+app.run()
